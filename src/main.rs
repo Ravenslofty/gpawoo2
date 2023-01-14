@@ -61,7 +61,7 @@ impl UnpackedFloat {
     pub fn unpack(x: u32) -> UnpackedFloat {
         let sign = (x >> 31) != 0;
         let exp_raw = (x >> Self::EXPLICIT_MANTISSA_WIDTH) & ((1 << Self::EXPONENT_WIDTH) - 1);
-        let frac_raw = x & (1 << Self::EXPLICIT_MANTISSA_WIDTH - 1);
+        let frac_raw = x & ((1 << Self::EXPLICIT_MANTISSA_WIDTH) - 1);
 
         if exp_raw == 0 {
             UnpackedFloat{sign, exponent: -Self::EXPONENT_BIAS, mantissa: 0}
@@ -114,7 +114,9 @@ impl UnpackedFloat {
     }
 
     fn sticky_lsr(x: u64, shift_amount: i32) -> u64 {
-        if shift_amount >= 64 {
+        if shift_amount == 0 {
+            x
+        } else if shift_amount >= 64 {
             (x != 0) as u64
         } else {
             (x >> shift_amount) | ((x & ((1 << shift_amount) - 1) != 0) as u64)
@@ -123,8 +125,13 @@ impl UnpackedFloat {
 
     pub fn fmadd(op1: UnpackedFloat, op2: UnpackedFloat, addend: UnpackedFloat) -> UnpackedFloat {
         let product_sign = op1.sign != op2.sign;
-        let product_exponent = op1.exponent + op2.exponent;
-        let product_mantissa_long = (op1.mantissa as u64) * (op2.mantissa as u64); // Q60
+        let mut product_exponent = op1.exponent + op2.exponent;
+        let mut product_mantissa_long = (op1.mantissa as u64) * (op2.mantissa as u64); // Q60
+
+        if (product_mantissa_long >> (Self::NORMALIZED_POINT_POSITION * 2 + 1)) != 0 {
+            product_mantissa_long >>= 1;
+            product_exponent += 1;
+        }
 
         if product_mantissa_long == 0 {
             return addend;
@@ -149,15 +156,12 @@ impl UnpackedFloat {
             }
         } else {
             // Sub
-            if exp_diff == 0 && product_mantissa_long > addend_mantissa_long {
-                let result_mantissa_long = product_mantissa_long - addend_mantissa_long;
-                Self::reduce_mantissa(product_sign, product_exponent, result_mantissa_long)
-            } else if exp_diff <= 0 {
-                let result_mantissa_long = addend_mantissa_long - Self::sticky_lsr(product_mantissa_long, -exp_diff);
-                Self::reduce_mantissa(addend.sign, addend.exponent, result_mantissa_long)
-            } else {
+            if exp_diff > 0 || (exp_diff == 0 && product_mantissa_long > addend_mantissa_long) {
                 let result_mantissa_long = product_mantissa_long - Self::sticky_lsr(addend_mantissa_long, exp_diff);
                 Self::reduce_mantissa(product_sign, product_exponent, result_mantissa_long)
+            } else {
+                let result_mantissa_long = addend_mantissa_long - Self::sticky_lsr(product_mantissa_long, -exp_diff);
+                Self::reduce_mantissa(addend.sign, addend.exponent, result_mantissa_long)
             }
         }
     }
@@ -270,6 +274,17 @@ mod tests {
     }
 
     #[test]
+    fn rand1() {
+        let mut fma = FmaUnit{
+            a: 0xF03479D1,
+            b: 0x8AEE42BF,
+            c: 0xBBA48E86,
+            q: 0,
+        };
+        assert_eq!(fma.step(0, 0, 0), 0x38DA7217);
+    }
+
+    #[test]
     fn addition_commutes() {
         for _ in 0..100 { 
             let x = rand::random::<u32>();
@@ -311,7 +326,7 @@ mod tests {
 
     #[test]
     fn random_tests() {
-        for _ in 0..100 { 
+        for _ in 0..10000000 {
             let x = rand::random::<u32>();
             let y = rand::random::<u32>();
             let z = rand::random::<u32>();
@@ -320,13 +335,13 @@ mod tests {
             let fy = f32::from_bits(y);
             let fz = f32::from_bits(z);
 
-            if fx.is_nan() || fx.is_infinite() { continue }
-            if fy.is_nan() || fy.is_infinite() { continue }
-            if fz.is_nan() || fz.is_infinite() { continue }
+            if fx.is_nan() || fx.is_infinite() || fx.is_subnormal() { continue }
+            if fy.is_nan() || fy.is_infinite() || fy.is_subnormal() { continue }
+            if fz.is_nan() || fz.is_infinite() || fz.is_subnormal() { continue }
 
             let result = fx.mul_add(fy, fz);
 
-            if result.is_nan() || result.is_infinite() { continue }
+            if result.is_nan() || result.is_infinite() || result.is_subnormal() { continue }
 
             let q = FmaUnit{
                 a: x,
@@ -334,12 +349,6 @@ mod tests {
                 c: z,
                 q: 0,
             }.step(0, 0, 0);
-
-            dbg!(x);
-            dbg!(y);
-            dbg!(z);
-            dbg!(q);
-            dbg!(result.to_bits());
 
             assert_eq!(result.to_bits(), q)
         }
