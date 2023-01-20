@@ -306,8 +306,8 @@ mod tests {
 
             let q3 = FmaUnit{
                 a: 0x3f800000,
-                b: y,
-                c: x,
+                b: x,
+                c: y,
                 q: 0,
             }.step(0, 0, 0);
 
